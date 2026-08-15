@@ -5,6 +5,7 @@
 #include <linux/ktime.h>
 #include <linux/hrtimer.h>
 #include <linux/slab.h>
+#include <linux/workqueue.h>
 
 #define MPU6050_ADDR              0x68
 #define MPU6050_REG_PWR_MGMT_1    0x6B
@@ -21,6 +22,7 @@ struct mpu6050_data {
 	struct regmap      *regmap;
 	struct input_dev   *input;
 	struct hrtimer      timer;
+	struct work_struct  work;
 };
 
 static const struct regmap_config mpu6050_regmap_config = {
@@ -54,11 +56,41 @@ static inline int mpu6050_write_reg(struct mpu6050_data *data, u8 reg, u8 val)
 	return ret;
 }
 
+static void mpu6050_work_handler(struct work_struct *work)
+{
+	struct mpu6050_data *data = container_of(work, struct mpu6050_data, work);
+	u8 buf[14];
+	s16 accel_x, accel_y, accel_z;
+	s16 gyro_x, gyro_y, gyro_z;
+	int ret;
+
+	ret = regmap_bulk_read(data->regmap, MPU6050_REG_ACCEL_XOUT_H, buf, 14);
+	if (ret) {
+		dev_err(&data->client->dev, "bulk read failed: %d\n", ret);
+		return;
+	}
+
+	accel_x = (s16)((buf[0] << 8) | buf[1]);
+	accel_y = (s16)((buf[2] << 8) | buf[3]);
+	accel_z = (s16)((buf[4] << 8) | buf[5]);
+	gyro_x  = (s16)((buf[8]  << 8) | buf[9]);
+	gyro_y  = (s16)((buf[10] << 8) | buf[11]);
+	gyro_z  = (s16)((buf[12] << 8) | buf[13]);
+
+	input_report_abs(data->input, ABS_X,  accel_x);
+	input_report_abs(data->input, ABS_Y,  accel_y);
+	input_report_abs(data->input, ABS_Z,  accel_z);
+	input_report_abs(data->input, ABS_RX, gyro_x);
+	input_report_abs(data->input, ABS_RY, gyro_y);
+	input_report_abs(data->input, ABS_RZ, gyro_z);
+	input_sync(data->input);
+}
+
 static enum hrtimer_restart mpu6050_timer_callback(struct hrtimer *timer)
 {
 	struct mpu6050_data *data = container_of(timer, struct mpu6050_data, timer);
 
-	dev_info(&data->client->dev, "MPU6050 timer tick\n");
+	schedule_work(&data->work);  /* 调度 workqueue */
 
 	hrtimer_forward_now(timer, ms_to_ktime(MPU6050_SAMPLE_PERIOD_MS));
 	return HRTIMER_RESTART;
@@ -93,7 +125,33 @@ static int mpu6050_probe(struct i2c_client *client)
 	if (ret)
 		goto err_free_data;
 
-	/* 6.18 内核：用 hrtimer_setup 替代 hrtimer_init + function 赋值 */
+	/* ---- 创建 Input 设备 ---- */
+	data->input = devm_input_allocate_device(&client->dev);
+	if (!data->input) {
+		ret = -ENOMEM;
+		goto err_free_data;
+	}
+
+	data->input->name = "MPU6050";
+	data->input->id.bustype = BUS_I2C;
+
+	input_set_abs_params(data->input, ABS_X,  -32768, 32767, 0, 0);
+	input_set_abs_params(data->input, ABS_Y,  -32768, 32767, 0, 0);
+	input_set_abs_params(data->input, ABS_Z,  -32768, 32767, 0, 0);
+	input_set_abs_params(data->input, ABS_RX, -32768, 32767, 0, 0);
+	input_set_abs_params(data->input, ABS_RY, -32768, 32767, 0, 0);
+	input_set_abs_params(data->input, ABS_RZ, -32768, 32767, 0, 0);
+
+	ret = input_register_device(data->input);
+	if (ret) {
+		dev_err(&client->dev, "input register failed: %d\n", ret);
+		goto err_free_data;
+	}
+
+	/* ---- 初始化 workqueue ---- */
+	INIT_WORK(&data->work, mpu6050_work_handler);
+
+	/* ---- 启动 hrtimer ---- */
 	hrtimer_setup(&data->timer, mpu6050_timer_callback,
 		      CLOCK_MONOTONIC, HRTIMER_MODE_REL);
 	hrtimer_start(&data->timer, ms_to_ktime(MPU6050_SAMPLE_PERIOD_MS),
@@ -112,6 +170,7 @@ static void mpu6050_remove(struct i2c_client *client)
 	struct mpu6050_data *data = i2c_get_clientdata(client);
 
 	hrtimer_cancel(&data->timer);
+	cancel_work_sync(&data->work);  /* 等当前 work 执行完 */
 	kfree(data);
 	dev_info(&client->dev, "MPU6050 removed\n");
 }
@@ -143,3 +202,4 @@ module_i2c_driver(mpu6050_driver);
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Your Name");
 MODULE_DESCRIPTION("MPU6050 Input driver for Orange Pi Zero (6.18 kernel)");
+
