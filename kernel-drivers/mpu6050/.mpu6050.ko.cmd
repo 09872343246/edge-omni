@@ -1,0 +1,1 @@
+savedcmd_mpu6050.ko := ld -r -EL -z noexecstack --no-warn-rwx-segments --build-id=sha1  -T /usr/src/linux-headers-6.18.35-current-sunxi/scripts/module.lds -o mpu6050.ko mpu6050.o mpu6050.mod.o .module-common.o

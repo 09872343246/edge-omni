@@ -1,0 +1,1 @@
+savedcmd_Module.symvers :=  /usr/src/linux-headers-6.18.35-current-sunxi/scripts/mod/modpost -M          -o Module.symvers -T modules.order -i /usr/src/linux-headers-6.18.35-current-sunxi/Module.symvers -e 
