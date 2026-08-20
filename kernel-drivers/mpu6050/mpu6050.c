@@ -7,6 +7,11 @@
 #include <linux/slab.h>
 #include <linux/workqueue.h>
 
+#include <linux/gpio/consumer.h>
+#include <linux/delay.h>
+
+#include <linux/debugfs.h>
+
 #define MPU6050_ADDR              0x68
 #define MPU6050_REG_PWR_MGMT_1    0x6B
 #define MPU6050_REG_ACCEL_CONFIG  0x1C
@@ -23,6 +28,12 @@ struct mpu6050_data {
 	struct input_dev   *input;
 	struct hrtimer      timer;
 	struct work_struct  work;
+
+
+	struct gpio_desc        *scl_gpio;
+	struct gpio_desc        *sda_gpio;
+	u32            		recovery_count;
+	struct dentry		*debugfs_dir;
 };
 
 static const struct regmap_config mpu6050_regmap_config = {
@@ -31,6 +42,53 @@ static const struct regmap_config mpu6050_regmap_config = {
 	.max_register = 0x7F,
 };
 
+static void mpu6050_i2c_bus_recovery(struct mpu6050_data *data)
+{
+        int i;
+
+        dev_info(&data->client->dev, ">>> I2C bus recovery started\n");
+        data->recovery_count++;
+	if (!data->scl_gpio || !data->sda_gpio) {
+                dev_err(&data->client->dev,
+                        "Recovery GPIOs missing, abort!\n");
+                return;
+        }
+	gpiod_direction_output(data->scl_gpio, 1);
+        gpiod_direction_output(data->sda_gpio, 1);
+
+        gpiod_set_value(data->scl_gpio, 1);
+        gpiod_set_value(data->sda_gpio, 1);
+        udelay(5);
+        for (i = 0; i < 9; i++) {
+                gpiod_set_value(data->scl_gpio, 0);
+                udelay(5);
+                gpiod_set_value(data->scl_gpio, 1);
+                udelay(5);
+        }
+        gpiod_set_value(data->sda_gpio, 0);
+        udelay(5);
+        gpiod_set_value(data->scl_gpio, 1);
+        udelay(5);
+        gpiod_set_value(data->sda_gpio, 1);
+        udelay(5);
+
+        gpiod_direction_input(data->scl_gpio);
+        gpiod_direction_input(data->sda_gpio);
+
+        dev_info(&data->client->dev,
+                 ">>> I2C bus recovery done, total count=%u\n",
+                 data->recovery_count);
+}
+
+static int mpu6050_check_bus_error(struct mpu6050_data *data, int ret){
+	if(ret >= 0)
+	return 0;
+	if(ret == -EAGAIN || ret == -ETIMEDOUT){
+		dev_err(&data->client->dev,"Bus stuck detected (err=%d),recovery count=%u\n",ret,data->recovery_count);
+		mpu6050_i2c_bus_recovery(data);
+	}
+	return ret;
+}
 static inline int mpu6050_read_reg(struct mpu6050_data *data, u8 reg, u8 *val)
 {
 	unsigned int tmp;
@@ -65,6 +123,8 @@ static void mpu6050_work_handler(struct work_struct *work)
 	int ret;
 
 	ret = regmap_bulk_read(data->regmap, MPU6050_REG_ACCEL_XOUT_H, buf, 14);
+
+	ret = mpu6050_check_bus_error(data ,ret);
 	if (ret) {
 		dev_err(&data->client->dev, "bulk read failed: %d\n", ret);
 		return;
@@ -115,6 +175,20 @@ static int mpu6050_probe(struct i2c_client *client)
 		goto err_free_data;
 	}
 
+	data->scl_gpio = devm_gpiod_get(&client->dev, "scl", GPIOD_ASIS);
+        if (IS_ERR(data->scl_gpio)) {
+                dev_warn(&client->dev,
+                         "SCL GPIO not available, bus recovery disabled\n");
+                data->scl_gpio = NULL;
+        }
+
+        data->sda_gpio = devm_gpiod_get(&client->dev, "sda", GPIOD_ASIS);
+        if (IS_ERR(data->sda_gpio)) {
+                dev_warn(&client->dev,
+                         "SDA GPIO not available, bus recovery disabled\n");
+                data->sda_gpio = NULL;
+        }
+
 	ret = mpu6050_write_reg(data, MPU6050_REG_PWR_MGMT_1,
 				MPU6050_VAL_WAKEUP);
 	if (ret)
@@ -157,6 +231,15 @@ static int mpu6050_probe(struct i2c_client *client)
 	hrtimer_start(&data->timer, ms_to_ktime(MPU6050_SAMPLE_PERIOD_MS),
 		      HRTIMER_MODE_REL);
 
+	data->debugfs_dir = debugfs_create_dir("mpu6050", NULL);
+        if (IS_ERR_OR_NULL(data->debugfs_dir)) {
+        	dev_warn(&client->dev,"debugfs dir creation failed, skipping\n");
+        	data->debugfs_dir = NULL;
+        } else {
+        	debugfs_create_u32("bus_recovery_count", 0444,data->debugfs_dir,&data->recovery_count);
+        }
+
+
 	dev_info(&client->dev, "MPU6050 probed, +-2g range set\n");
 	return 0;
 
@@ -169,6 +252,8 @@ static void mpu6050_remove(struct i2c_client *client)
 {
 	struct mpu6050_data *data = i2c_get_clientdata(client);
 
+	if (data->debugfs_dir)
+                debugfs_remove_recursive(data->debugfs_dir);
 	hrtimer_cancel(&data->timer);
 	cancel_work_sync(&data->work);  /* 等当前 work 执行完 */
 	kfree(data);

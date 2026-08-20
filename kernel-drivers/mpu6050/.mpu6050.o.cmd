@@ -1360,6 +1360,10 @@ deps_mpu6050.o := \
   /usr/src/linux-headers-6.18.35-current-sunxi/include/linux/input.h \
   /usr/src/linux-headers-6.18.35-current-sunxi/include/uapi/linux/input.h \
   /usr/src/linux-headers-6.18.35-current-sunxi/include/uapi/linux/input-event-codes.h \
+  /usr/src/linux-headers-6.18.35-current-sunxi/include/linux/gpio/consumer.h \
+    $(wildcard include/config/HTE) \
+    $(wildcard include/config/GPIO_SYSFS) \
+  /usr/src/linux-headers-6.18.35-current-sunxi/include/linux/debugfs.h \
 
 mpu6050.o: $(deps_mpu6050.o)
 
