@@ -1,0 +1,1 @@
+savedcmd_sht30.ko := ld -r -EL -z noexecstack --no-warn-rwx-segments --build-id=sha1  -T /usr/src/linux-headers-6.18.35-current-sunxi/scripts/module.lds -o sht30.ko sht30.o sht30.mod.o .module-common.o
