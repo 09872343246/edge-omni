@@ -83,8 +83,8 @@ static void mpu6050_i2c_bus_recovery(struct mpu6050_data *data)
 static int mpu6050_check_bus_error(struct mpu6050_data *data, int ret){
 	if(ret >= 0)
 	return 0;
-	if(ret == -EAGAIN || ret == -ETIMEDOUT){
-		dev_err(&data->client->dev,"Bus stuck detected (err=%d),recovery count=%u\n",ret,data->recovery_count);
+	if (ret == -EAGAIN || ret == -ETIMEDOUT || ret == -EIO ||ret == -EREMOTEIO || ret == -ENXIO || ret == -EBUSY) {
+		dev_err(&data->client->dev,"Bus stuck detected (err=%d), recovery count=%u\n",ret, data->recovery_count);
 		mpu6050_i2c_bus_recovery(data);
 	}
 	return ret;
@@ -123,6 +123,12 @@ static void mpu6050_work_handler(struct work_struct *work)
 	int ret;
 
 	ret = regmap_bulk_read(data->regmap, MPU6050_REG_ACCEL_XOUT_H, buf, 14);
+
+	if(ret <0){
+		dev_err(&data->client->dev,"DEBUG:bulk_read returned %d\n",ret);
+	}
+
+
 
 	ret = mpu6050_check_bus_error(data ,ret);
 	if (ret) {
@@ -285,6 +291,6 @@ static struct i2c_driver mpu6050_driver = {
 module_i2c_driver(mpu6050_driver);
 
 MODULE_LICENSE("GPL");
-MODULE_AUTHOR("Your Name");
+MODULE_AUTHOR("ChongZhou");
 MODULE_DESCRIPTION("MPU6050 Input driver for Orange Pi Zero (6.18 kernel)");
 
