@@ -50,6 +50,47 @@ void *collector_thread(void *arg){
 	return NULL;
 }
 
+
+
+
+void *web_thread(void *arg){
+	pthread_setname_np(pthread_self(), MAIN_THREAD_NAME);
+	cpu_set_t cpuset;
+	CPU_ZERO(&cpuset);
+	CPU_SET(MAIN_CPU_CORE, &cpuset);
+	int ret = pthread_setaffinity_np(
+		pthread_self(),
+		sizeof(cpu_set_t),
+		&cpuset
+	);
+
+	if (ret != 0) {
+		perror("web_thread: pthread_setaffinity_np failed");
+		return NULL;
+	}
+	printf("[web] 已绑定到 CPU核心%d\n", MAIN_CPU_CORE);
+	struct sched_param param;
+	param.sched_priority = MAIN_PRIORITY;
+	ret = pthread_setschedparam(
+		pthread_self(),
+		MAIN_SCHED_POLICY,
+		&param
+	);
+        if (ret != 0) {
+                perror("web_thread: pthread_setschedparam failed");
+                return NULL;
+        }
+	printf("[web] 已设置 SCHED_OTHER，优先级 %d\n", MAIN_PRIORITY);
+	while (1) {
+		volatile double result = 0.0;
+		for (int i = 0; i < 1000000; i++) {
+			result += i * 0.000001;
+		}
+		struct timespec ts = {.tv_sec = 0, .tv_nsec = 1000};
+		nanosleep(&ts, NULL);
+	}
+	return NULL;
+}
 int main(int argc, char *argv[]){
 	pthread_t collector_tid;
 	printf("=== Edge-Omni 启动 ===\n");
@@ -71,7 +112,25 @@ int main(int argc, char *argv[]){
 	CPU_SET(MAIN_CPU_CORE, &main_cpuset);
 	pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &main_cpuset);
 	printf("[main] 已绑定到 CPU核心%d\n", MAIN_CPU_CORE);
+
+
+	pthread_t web_tid;
+	printf("创建 Web 线程...\n");
+	ret = pthread_create(
+		&web_tid,
+		NULL,
+		web_thread,
+		NULL
+	);
+	if (ret != 0) {
+		perror("pthread_create web_thread failed");
+		exit(EXIT_FAILURE);
+	}
+	printf("Web 线程已创建，TID=%lu\n", (unsigned long)web_tid);
+
+
 	pthread_join(collector_tid, NULL);
+	pthread_join(web_tid, NULL);
 	return 0;
 }
 

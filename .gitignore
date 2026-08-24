@@ -1,0 +1,13 @@
+# 编译产物
+*.o
+*.bin
+*.elf
+collector
+test_ring_buffer
+build/*
+app/*.o
+app/collector
+
+# 临时文件
+*~
+*.swp
