@@ -1,0 +1,11 @@
+[Unit] 
+Description=Edge-Omni CPU Battle Mode Setup
+
+Before=sensor-collector.service
+[Service]
+Type=oneshot
+ExecStart=/root/edge-omni/scripts/setup_cpu.sh
+~/edge-omni
+RemainAfterExit=yes
+[Install]
+WantedBy=multi-user.target
