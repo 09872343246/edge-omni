@@ -20,7 +20,10 @@
 #include "include/fsm.h"
 #include "sensor_hal.h"
 
+
 fsm_context_t g_fsm;
+
+ring_buffer_t g_rb;
 
 
 void *collector_thread(void *arg){
@@ -99,6 +102,9 @@ void *collector_thread(void *arg){
 					}
 				}
 				mpu_fail_streak = 0;
+				for (int i = 0;i<count;i++){
+					ring_buffer_push(&g_rb, mpu_buf[i]);
+				}
 				printf("[collector] MPU6050 数据: ");
 				for (int i = 0; i < count; i++) {
 					printf("[%s ch=%d val=%d] ",mpu_buf[i].sensor_type == SENSOR_MPU6050 ? "MPU" : "?",mpu_buf[i].channel, mpu_buf[i].value);
@@ -124,8 +130,9 @@ void *collector_thread(void *arg){
 					printf("[collector] SHT30 恢复成功\n");
 				}
 				sht_fail_streak = 0;
-				atomic_store(&g_fsm.temp_raw, sht_buf[0].value);
-				atomic_store(&g_fsm.hum_raw, sht_buf[1].value);
+				for (int i = 0; i < count; i++) {
+					ring_buffer_push(&g_rb, sht_buf[i]);
+				}
 				printf("[collector] SHT30 数据: ");
 				for (int i = 0; i < count; i++) {
 					printf("[%s ch=%d val=%d] ",sht_buf[i].sensor_type == SENSOR_SHT30 ? "SHT" : "?",sht_buf[i].channel, sht_buf[i].value);
@@ -235,7 +242,7 @@ void *web_thread(void *arg){
 	printf("[web] 测试命令: curl http://localhost:8080/\n");
 
 
-
+	system_state_t prev_state = STATE_INIT;
 	while (1) {
 
 /*		system_state_t state = fsm_get_state(&g_fsm);
@@ -302,17 +309,9 @@ void *web_thread(void *arg){
 
 		if (strcmp(path, "/metrics") == 0) {
 			system_state_t state = fsm_get_state(&g_fsm);
-			const char *state_str = fsm_get_state_name(&g_fsm);
-
-			int mpu_fails = atomic_fetch_add(&g_fsm.mpu_fail_count,0);
-			int i2c_retries = atomic_fetch_add(&g_fsm.i2c_retry_count,0);
-
-			int temp_raw = atomic_fetch_add(&g_fsm.temp_raw, 0);
-			int hum_raw  = atomic_fetch_add(&g_fsm.hum_raw, 0);
-
-
-
-			char body[8192];
+			int mpu_fails = atomic_load(&g_fsm.mpu_fail_count);
+			int i2c_retries = atomic_load(&g_fsm.i2c_retry_count);
+			char body[1024];
 			int body_len = snprintf(body, sizeof(body),
 				"# HELP system_state Current system state (0=INIT,1=RUNNING,2=DEGRADED,3=RECOVERING,4=FAULT)\n"
 				"# TYPE system_state gauge\n"
@@ -328,25 +327,13 @@ void *web_thread(void *arg){
 				"\n"
 				"# HELP i2c_retry_total Total I2C retry attempts\n"
 				"# TYPE i2c_retry_total counter\n"
-				"i2c_retry_total %d\n"
-				"\n"
-				"# HELP sensor_temperature_celsius Temperature in celsius\n"
-				"# TYPE sensor_temperature_celsius gauge\n"
-				"sensor_temperature_celsius{id=\"sht30\"} %.1f\n"
-				"\n"
-				"# HELP sensor_humidity_percent Relative humidity in percent\n"
-				"# TYPE sensor_humidity_percent gauge\n"
-				"sensor_humidity_percent{id=\"sht30\"} %.1f\n",
-
+				"i2c_retry_total %d\n",
 				state,
-				state_str,
+				state_name[state],
 				mpu_fails,
-				i2c_retries,
-				temp_raw / 1000.0, hum_raw / 1000.0
+				i2c_retries
 			);
-			if (body_len < 0 || body_len >= (int)sizeof(body)) {
-				 body_len = sizeof(body) - 1;
-			}
+
 			send_http_response(client_fd,200,"text/plain; charset=utf-8",body, body_len);
 
 		} else if (strcmp(path, "/") == 0) {
@@ -354,51 +341,45 @@ void *web_thread(void *arg){
 			const char *state_str = state_name[state];
 
 			const char *color;
-			int temp_raw = atomic_fetch_add(&g_fsm.temp_raw, 0);
-			int hum_raw  = atomic_fetch_add(&g_fsm.hum_raw, 0);
-			double temp = temp_raw / 1000.0;
-			double hum  = hum_raw / 1000.0;
 			switch (state) {
 				case STATE_RUNNING:	color = "green";	break;
 				case STATE_DEGRADED:	color = "orange";	break;
 				case STATE_RECOVERING:	color = "blue";	break;
 				case STATE_FAULT:	color = "red";	break;					default:		color = "gray";	break;
 				}
-
 			char body[4096];
 			int body_len = snprintf(body, sizeof(body),
 				"<!DOCTYPE html>\n"
 				"<html>\n"
 				"<head>\n"
 				"  <meta charset=\"UTF-8\">\n"
-				"  <title>Edge-Omni 监控看板</title>\n"
+				"  <title>Edge‑Omni 监控看板</title>\n"
 				"  <style>\n"
-				"    body {font-family: monospace; margin: 40px; background: #1a1a2e; color: #eee; }\n"
-				"    .card { background: #16213e; padding: 20px; border-radius: 10px; margin: 20px 0; }\n"
-				"    .state { font-size: 48px; font-weight: bold; transition: color 0.5s; }\n"
+				"    body {font‑family: monospace; margin: 40px; background: #1a1a2e; color: #eee; }\n"
+				"    .card { background: #16213e; padding: 20px; border‑radius: 10px; margin: 20px 0; }\n"
+				"    .state { font‑size: 48px; font‑weight: bold; transition: color 0.5s; }\n"
 				"    .green { color: #00ff88; }\n"
 				"    .orange { color: #ffaa00; }\n"
 				"    .blue { color: #00aaff; }\n"
 				"    .red { color: #ff4444; }\n"
 				"    .gray { color: #888888; }\n"
-				"    .metric { font-size: 20px; margin: 8px 0; color: #aaa; }\n"
-				"    .value { color: #fff; font-weight: bold; }\n"
+				"    .metric { font‑size: 20px; margin: 8px 0; color: #aaa; }\n"
+				"    .value { color: #fff; font‑weight: bold; }\n"
 				"    a { color: #00aaff; }\n"
-				"    #timestamp { color: #666; font-size: 14px; margin-top: 10px; }\n"
+				"    #timestamp { color: #666; font‑size: 14px; margin‑top: 10px; }\n"
 				"  </style>\n"
 				"</head>\n"
 				"<body>\n"
-				"  <h1>Edge-Omni 系统状态看板</h1>\n"
+				"  <h1>Edge‑Omni 系统状态看板</h1>\n"
 				"  <div class=\"card\">\n"
 				"    <div>当前状态</div>\n"
-				"    <div id=\"state-display\" class=\"state %s\">%s</div>\n"
+				"    <div id=\"state‑display\" class=\"state %s\">%s</div>\n"
 				"    <div id=\"timestamp\">最后更新: 刚刚</div>\n"
 				"  </div>\n"
 				"  <div class=\"card\">\n"
-				"    <div class=\"sensor\" style=\"font-size:28px;color:#00ff88;margin:5px 0;\">温度: <span id=\"temp-val\">%.1f</span> C</div>\n"
-				"    <div class=\"sensor\" style=\"font-size:28px;color:#00aaff;margin:5px 0;\">湿度: <span id=\"hum-val\">%.1f</span> %%</div>\n"
-				"    <div class=\"metric\">MPU6050 失败次数: <span id=\"mpu-fails\" class=\"value\">%d</span></div>\n"
-				"    <div class=\"metric\">I2C 重试次数: <span id=\"i2c-retries\" class=\"value\">%d</span></div>\n"
+				"    <div class=\"metric\">MPU6050 失败次数: <span id=\"mpu‑fails\" class=\"value\">%d</span></div>\n"
+				"    <div class=\"metric\">I2C 重试次数: <span id=\"i2c‑retries\" class=\"value\">%d</span></div>\n"
+				"    <div class=\"metric\">采集循环次数: <span id=\"loop‑count\" class=\"value\">%d</span></div>\n"
 				"  </div>\n"
 				"  <div class=\"card\">\n"
 				"    <a href=\"/metrics\">查看 Prometheus 原始数据 (/metrics)</a>\n"
@@ -417,16 +398,13 @@ void *web_thread(void *arg){
 				"        const nameMatch = text.match(/system_state_name\\{state=\"(\\w+)\"\\} 1/);\n"
 				"        const mpuMatch = text.match(/mpu_fail_total (\\d+)/);\n"
 				"        const i2cMatch = text.match(/i2c_retry_total (\\d+)/);\n"
-				"        const tempMatch = text.match(/sensor_temperature_celsius\\{id=\"sht30\"\\} ([\\d.]+)/);\n"
-				"        const humMatch  = text.match(/sensor_humidity_percent\\{id=\"sht30\"\\} ([\\d.]+)/);\n"
-
 				"        \n"
 				"        if (stateMatch && nameMatch) {\n"
 				"          const stateNum = parseInt(stateMatch[1]);\n"
 				"          const stateName = nameMatch[1];\n"
 				"          \n"
 				"          \n"
-				"          const display = document.getElementById('state-display');\n"
+				"          const display = document.getElementById('state‑display');\n"
 				"          display.textContent = stateName;\n"
 				"          \n"
 				"          \n"
@@ -437,15 +415,13 @@ void *web_thread(void *arg){
 				"          }\n"
 				"          \n"
 				"          \n"
-				"          const now = new Date().toLocaleTimeString('zh-CN');\n"
+				"          const now = new Date().toLocaleTimeString('zh‑CN');\n"
 				"          document.getElementById('timestamp').textContent = '最后更新: ' + now;\n"
 				"        }\n"
 				"        \n"
 				"        \n"
-				"        if (mpuMatch) document.getElementById('mpu-fails').textContent = mpuMatch[1];\n"
-				"        if (tempMatch) document.getElementById('temp-val').textContent = tempMatch[1];\n"
-				"        if (humMatch)  document.getElementById('hum-val').textContent = humMatch[1];\n"
-				"        if (i2cMatch) document.getElementById('i2c-retries').textContent = i2cMatch[1];\n"
+				"        if (mpuMatch) document.getElementById('mpu‑fails').textContent = mpuMatch[1];\n"
+				"        if (i2cMatch) document.getElementById('i2c‑retries').textContent = i2cMatch[1];\n"
 				"        \n"
 				"      } catch (e) {\n"
 				"        console.error('刷新失败:', e);\n"
@@ -454,9 +430,10 @@ void *web_thread(void *arg){
 				"  </script>\n"
 				"</body>\n"
 				"</html>\n",
-				color, state_str,temp,hum,
-				atomic_fetch_add(&g_fsm.mpu_fail_count, 0),
-				atomic_fetch_add(&g_fsm.i2c_retry_count, 0)
+				color, state_str,
+				atomic_load(&g_fsm.mpu_fail_count),
+				atomic_load(&g_fsm.i2c_retry_count),
+				atomic_load(&g_loop_count)
 			);
 
 
@@ -487,6 +464,17 @@ int main(int argc, char *argv[]){
 
 	fsm_transition(&g_fsm, EVENT_INIT_OK);
 	printf("[main] 当前系统状态: %s\n", fsm_get_state_name(&g_fsm));
+	printf("MPU_FAIL 后状态: %s\n", fsm_get_state_name(&g_fsm));
+	fsm_transition(&g_fsm, EVENT_MPU_RESTORED);
+        printf("MPU_RESTORED 后状态: %s\n", fsm_get_state_name(&g_fsm));
+        fsm_transition(&g_fsm, EVENT_I2C_DEADLOCK);
+        printf("I2C_DEADLOCK 后状态: %s\n", fsm_get_state_name(&g_fsm));
+        fsm_transition(&g_fsm, EVENT_BUS_RECOVERED);
+        printf("BUS_RECOVERED 后状态: %s\n", fsm_get_state_name(&g_fsm));
+	int illegal = fsm_transition(&g_fsm, EVENT_INIT_OK);
+	printf("非法转换 INIT_OK(从RUNNING): %s (ret=%d, -1=拒绝)\n",fsm_get_state_name(&g_fsm), illegal);
+	printf("========== 自测通过 ==========\n\n");
+
 
         pthread_t collector_tid;
 	printf("创建采集线程...\n");

@@ -1,0 +1,348 @@
+#define _GNU_SOURCE
+
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <pthread.h>
+#include <time.h>
+#include <unistd.h>
+#include <errno.h>
+#include <stdatomic.h>
+
+
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+
+
+#include "include/thread_config.h"
+#include "include/fsm.h"
+
+fsm_context_t g_fsm;
+
+static atomic_int g_loop_count = 0;
+static atomic_int g_mpu_fail_count = 0;
+
+
+
+void *collector_thread(void *arg){
+	pthread_setname_np(pthread_self(),COLLECTOR_THREAD_NAME);
+	cpu_set_t cpuset;
+	CPU_ZERO(&cpuset);
+	CPU_SET(COLLECTOR_CPU_CORE,&cpuset);
+	int ret = pthread_setaffinity_np(
+		pthread_self(),
+		sizeof(cpu_set_t),
+		&cpuset
+	);
+	if(ret != 0){
+		perror("pthread_setaffinity_np failed");
+		return NULL;
+	}
+	printf("[collector]已绑定到cpu核心%d\n",COLLECTOR_CPU_CORE);
+
+
+	struct sched_param param;
+	param.sched_priority = COLLECTOR_PRIORITY;
+	ret = pthread_setschedparam(
+		pthread_self(),
+		COLLECTOR_SCHED_POLICY,
+		&param
+	);
+	if(ret != 0){
+		perror("pthread_setschedparam failed");
+		return NULL;
+	}
+	printf("[collector]已设置SCHED_FIFO,优先级%d\n",COLLECTOR_PRIORITY);
+
+
+	while(1){
+		int loop = atomic_fetch_add(&g_loop_count, 1);
+		int mpu_ok = 1;
+		if (loop >= 15 && loop <= 17) {
+			mpu_ok = 0;
+		}
+		if (loop >= 25) {
+			mpu_ok = 1;
+		}
+		if (!mpu_ok) {
+			int fail_streak = atomic_fetch_add(&g_mpu_fail_count, 1) + 1;
+			printf("[collector] MPU6050 模拟读失败 #%d (loop=%d)\n", fail_streak, loop);
+			if (fail_streak >= 3) {
+				printf("[collector] >>> 连续失败3次，触发 DEGRADED!\n");
+				fsm_transition(&g_fsm, EVENT_MPU_FAIL);
+			}
+		 } else {
+			int prev_fail = atomic_exchange(&g_mpu_fail_count, 0);
+			if (prev_fail > 0) {
+				printf("[collector] MPU6050 恢复正常 (之前连续失败%d次)\n", prev_fail);
+				if (fsm_get_state(&g_fsm) == STATE_DEGRADED) {
+					printf("[collector] >>> 触发恢复 RUNNING!\n");
+					fsm_transition(&g_fsm, EVENT_MPU_RESTORED);
+				}
+			}
+			printf("[collector] 正常采集... (loop=%d, state=%s)\n",loop, fsm_get_state_name(&g_fsm));
+		}
+		struct timespec ts = {.tv_sec = 0, .tv_nsec = 500000000};
+		nanosleep(&ts, NULL);
+	}
+	return NULL;
+}
+
+
+
+
+
+
+static void send_http_response(int client_fd, int status_code,const char *content_type,const char *body, int body_len){
+	char header[512];
+	const char *status_str;
+	status_str = (status_code == 200) ? "200 OK" : "404 Not Found";
+	int header_len = snprintf(header, sizeof(header),
+		"HTTP/1.1 %s\r\n"
+		"Content-Type: %s\r\n"
+		"Content-Length: %d\r\n"
+		"Connection: close\r\n"
+		"\r\n",
+		status_str, content_type, body_len);
+	send(client_fd, header, header_len, 0);
+	 send(client_fd, body, body_len, 0);
+}
+
+
+void *web_thread(void *arg){
+	pthread_setname_np(pthread_self(), MAIN_THREAD_NAME);
+	cpu_set_t cpuset;
+	CPU_ZERO(&cpuset);
+	CPU_SET(MAIN_CPU_CORE, &cpuset);
+	int ret = pthread_setaffinity_np(
+		pthread_self(),
+		sizeof(cpu_set_t),
+		&cpuset
+	);
+
+	if (ret != 0) {
+		perror("web_thread: pthread_setaffinity_np failed");
+		return NULL;
+	}
+	printf("[web] 已绑定到 CPU核心%d\n", MAIN_CPU_CORE);
+	struct sched_param param;
+	param.sched_priority = MAIN_PRIORITY;
+	ret = pthread_setschedparam(
+		pthread_self(),
+		MAIN_SCHED_POLICY,
+		&param
+	);
+        if (ret != 0) {
+                perror("web_thread: pthread_setschedparam failed");
+                return NULL;
+        }
+	printf("[web] 已设置 SCHED_OTHER，优先级 %d\n", MAIN_PRIORITY);
+
+
+	int server_fd = socket(AF_INET, SOCK_STREAM, 0);
+	if (server_fd < 0) {
+		perror("[web] socket创建失败");
+		return NULL;
+	}
+	int opt = 1;
+	setsockopt(server_fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+	struct sockaddr_in addr = {0};
+	addr.sin_family = AF_INET;
+	addr.sin_addr.s_addr = INADDR_ANY;
+	addr.sin_port = htons(8080);
+	if (bind(server_fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+		perror("[web] bind失败（端口8080可能被占用）");
+		close(server_fd);
+		return NULL;
+	}
+	if (listen(server_fd, 5) < 0) {
+		perror("[web] listen失败");
+		close(server_fd);
+		return NULL;
+	}
+	printf("[web] HTTP服务器启动，监听 0.0.0.0:8080\n");
+	printf("[web] 测试命令: curl http://localhost:8080/\n");
+
+
+	system_state_t prev_state = STATE_INIT;
+	while (1) {
+
+/*		system_state_t state = fsm_get_state(&g_fsm);
+		if (state != prev_state) {
+			switch (state) {
+				case STATE_INIT:
+					printf("[web] >>> 状态变化: INIT (初始化中)\n");
+					break;
+
+	                        case STATE_RUNNING:
+        	                        printf("[web] >>> 状态变化: RUNNING (全功能恢复!)\n");
+                			break;
+
+           			case STATE_DEGRADED:
+                	                printf("[web] >>> 状态变化: DEGRADED (降级模式，仅温湿度)\n");
+				        break;
+
+                        	case STATE_RECOVERING:
+                                	printf("[web] >>> 状态变化: RECOVERING (I2C总线恢复中...)\n");
+                                	break;
+
+               			case STATE_FAULT:
+					printf("[web] >>> 状态变化: FAULT (系统故障，即将重启)\n");
+					break;
+				default:
+					break;
+			}
+			prev_state = state;
+		}
+		struct timespec ts = {.tv_sec = 0, .tv_nsec = 1000};
+		nanosleep(&ts, NULL);
+	}
+	return NULL;
+
+*/
+		struct sockaddr_in client_addr;
+		socklen_t addr_len = sizeof(client_addr);
+		int client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &addr_len);
+		if (client_fd < 0) {
+			continue;
+		}
+		char req[256] = {0};
+		recv(client_fd, req, sizeof(req) - 1, 0);
+		char method[16] = {0}, path[64] = {0};
+		sscanf(req, "%15s %63s", method, path);
+		printf("[web] 收到请求: %s %s\n", method, path);
+
+
+		if (strcmp(path, "/metrics") == 0) {
+			system_state_t state = fsm_get_state(&g_fsm);
+			int mpu_fails = atomic_load(&g_fsm.mpu_fail_count);
+			int i2c_retries = atomic_load(&g_fsm.i2c_retry_count);
+			char body[1024];
+			int body_len = snprintf(body, sizeof(body),
+				"# HELP system_state Current system state (0=INIT,1=RUNNING,2=DEGRADED,3=RECOVERING,4=FAULT)\n"
+				"# TYPE system_state gauge\n"
+				"system_state %d\n"
+				"\n"
+				"# HELP system_state_name Human readable state name\n"
+				"# TYPE system_state_name gauge\n"
+				"system_state_name{state=\"%s\"} 1\n"
+				"\n"
+				"# HELP mpu_fail_total Total MPU6050 read failures\n"
+				"# TYPE mpu_fail_total counter\n"
+				"mpu_fail_total %d\n"
+				"\n"
+				"# HELP i2c_retry_total Total I2C retry attempts\n"
+				"# TYPE i2c_retry_total counter\n"
+				"i2c_retry_total %d\n",
+				state,
+				state_name[state],
+				mpu_fails,
+				i2c_retries
+			);
+			send_http_response(client_fd, 200,"text/plain; charset=utf-8",body, body_len);
+		} else if (strcmp(path, "/") == 0) {
+			system_state_t state = fsm_get_state(&g_fsm);
+			const char *state_str = state_name[state];
+			const char *color;
+			switch (state) {
+				case STATE_RUNNING:    color = "green";  break;
+				case STATE_DEGRADED:   color = "orange"; break;
+				case STATE_RECOVERING: color = "blue";   break;
+				case STATE_FAULT:      color = "red";    break;
+				default:               color = "gray";   break;
+			}
+			char body[2048];
+			int body_len = snprintf(body, sizeof(body),
+				
+
+
+		close(client_fd);
+	}
+	close(server_fd);
+	return NULL;
+
+
+
+}
+int main(int argc, char *argv[]){
+	printf("=== Edge-Omni 启动 ===\n");
+	printf("[main] 初始化状态机...\n");
+	if (fsm_init(&g_fsm) != 0) {
+		fprintf(stderr, "[main] 状态机初始化失败，退出!\n");
+		exit(EXIT_FAILURE);
+	}
+
+	fsm_transition(&g_fsm, EVENT_INIT_OK);
+	printf("[main] 当前系统状态: %s\n", fsm_get_state_name(&g_fsm));
+	printf("\n========== 状态机自测 ==========\n");
+	fsm_transition(&g_fsm, EVENT_MPU_FAIL);
+	printf("MPU_FAIL 后状态: %s\n", fsm_get_state_name(&g_fsm));
+	fsm_transition(&g_fsm, EVENT_MPU_RESTORED);
+        printf("MPU_RESTORED 后状态: %s\n", fsm_get_state_name(&g_fsm));
+        fsm_transition(&g_fsm, EVENT_I2C_DEADLOCK);
+        printf("I2C_DEADLOCK 后状态: %s\n", fsm_get_state_name(&g_fsm));
+        fsm_transition(&g_fsm, EVENT_BUS_RECOVERED);
+        printf("BUS_RECOVERED 后状态: %s\n", fsm_get_state_name(&g_fsm));
+	int illegal = fsm_transition(&g_fsm, EVENT_INIT_OK);
+	printf("非法转换 INIT_OK(从RUNNING): %s (ret=%d, -1=拒绝)\n",fsm_get_state_name(&g_fsm), illegal);
+	printf("========== 自测通过 ==========\n\n");
+
+
+        pthread_t collector_tid;
+	printf("创建采集线程...\n");
+	int ret = pthread_create(
+		&collector_tid,
+		NULL,
+		collector_thread,
+		NULL
+	);
+
+	if (ret != 0) {
+		perror("pthread_create failed");
+		exit(EXIT_FAILURE);
+	}
+	printf("采集线程已创建，TID=%lu\n", (unsigned long)collector_tid);
+	cpu_set_t main_cpuset;
+	CPU_ZERO(&main_cpuset);
+	CPU_SET(MAIN_CPU_CORE, &main_cpuset);
+	pthread_setaffinity_np(pthread_self(), sizeof(cpu_set_t), &main_cpuset);
+	printf("[main] 已绑定到 CPU核心%d\n", MAIN_CPU_CORE);
+
+
+	pthread_t web_tid;
+	printf("创建 Web 线程...\n");
+	ret = pthread_create(
+		&web_tid,
+		NULL,
+		web_thread,
+		NULL
+	);
+	if (ret != 0) {
+		perror("pthread_create web_thread failed");
+		exit(EXIT_FAILURE);
+	}
+	printf("Web 线程已创建，TID=%lu\n", (unsigned long)web_tid);
+
+
+	pthread_join(collector_tid, NULL);
+	pthread_join(web_tid, NULL);
+	return 0;
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
