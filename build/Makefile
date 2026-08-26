@@ -5,14 +5,16 @@ CFLAGS += -I/usr/include/libevdev-1.0
 CFLAGS += -D_POSIX_C_SOURCE=200809L
 
 
-LDFLAGS = -levdev -lpthread -latomic
+LDFLAGS = -levdev -lpthread -latomic -lsqlite3
 
 SRC_DIR = ../app
 CORE_SOURCES =	$(SRC_DIR)/core/ring_buffer.c \
 		$(SRC_DIR)/core/fsm.c \
+		$(SRC_DIR)/core/db_manager.c \
 		$(SRC_DIR)/hal/mpu6050_hal.c \
 		$(SRC_DIR)/hal/sht30_hal.c \
 		$(SRC_DIR)/hal/hal_register.c
+
 MAIN_SOURCE = $(SRC_DIR)/main.c
 TEST_SRC = $(SRC_DIR)/core/ring_buffer_test.c
 
@@ -20,7 +22,7 @@ TEST_SRC = $(SRC_DIR)/core/ring_buffer_test.c
 
 CORE_OBJECTS = $(CORE_SOURCES:.c=.o)
 MAIN_OBJECT  = $(MAIN_SOURCE:.c=.o)
-TEST_OBJ     = $(TEST_SRC:.c=.o)
+TEST_OBJECT  = $(TEST_SRC:.c=.o)
 
 
 %.o: %.c

@@ -19,6 +19,8 @@
 #include "include/thread_config.h"
 #include "include/fsm.h"
 #include "sensor_hal.h"
+#include "db_manager.h"
+
 
 fsm_context_t g_fsm;
 
@@ -166,11 +168,18 @@ void *collector_thread(void *arg){
 				}
 				mpu_fail_streak = 0;
 				printf("[collector] MPU6050 数据: ");
+				const char *name[] = {"AX","AY","AZ","GX","GY","GZ"};
 				for (int i = 0; i < count; i++) {
-					const char *name[] = {"AX","AY","AZ","GX","GY","GZ"};
 					printf("%s=%d ", name[mpu_buf[i].channel], mpu_buf[i].value);
 				}
 				printf("\n");
+
+
+				int ts = (int)time(NULL);
+				for (int i = 0; i < count; i++) {
+					db_insert_sensor(ts, "mpu6050", name[mpu_buf[i].channel], mpu_buf[i].value);
+				}
+
 			}
 
 		}
@@ -202,6 +211,12 @@ mpu_done:
 					printf("[%s ch=%d val=%d] ",sht_buf[i].sensor_type == SENSOR_SHT30 ? "SHT" : "?",sht_buf[i].channel, sht_buf[i].value);
 				}
 				printf("\n");
+
+				int ts = (int)time(NULL);
+				for (int i = 0; i < count; i++) {
+					const char *ch_name = (sht_buf[i].channel == 0) ? "temperature" : "humidity";
+					db_insert_sensor(ts, "sht30", ch_name, sht_buf[i].value);
+				}
 			}
 		}
 
@@ -556,10 +571,24 @@ int main(int argc, char *argv[]){
 		exit(EXIT_FAILURE);
 	}
 
+	printf("[main] 初始化数据库...\n");
+	if (db_init() != 0) {
+		fprintf(stderr, "[main] 数据库初始化失败,退出!\n");
+		exit(EXIT_FAILURE);
+	}
+	if (db_check_and_repair() != 0) {
+		fprintf(stderr, "[main] 数据库损坏且无法修复,退出!\n");
+		exit(EXIT_FAILURE);
+	}
+	printf("[main] 数据库就绪\n");
+
+
 	fsm_transition(&g_fsm, EVENT_INIT_OK);
 	printf("[main] 当前系统状态: %s\n", fsm_get_state_name(&g_fsm));
+	db_insert_alarm((int)time(NULL), "test_alarm", 1, "系统启动测试报警");
 
-        pthread_t collector_tid;
+
+	pthread_t collector_tid;
 	printf("创建采集线程...\n");
 	int ret = pthread_create(
 		&collector_tid,
@@ -597,6 +626,9 @@ int main(int argc, char *argv[]){
 
 	pthread_join(collector_tid, NULL);
 	pthread_join(web_tid, NULL);
+
+	db_close();
+
 	return 0;
 }
 
