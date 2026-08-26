@@ -27,6 +27,12 @@ TEST_OBJECT  = $(TEST_SRC:.c=.o)
 
 %.o: %.c
 	$(CC) $(CFLAGS) -c $< -o $@
+
+ASAN_CFLAGS  = -fsanitize=address -fno-omit-frame-pointer -g
+ASAN_LDFLAGS = -fsanitize=address
+
+
+
 .PHONY: all clean
 
 
@@ -34,6 +40,10 @@ all: collector
 collector: $(CORE_OBJECTS) $(MAIN_OBJECT)
 	$(CC) $(CORE_OBJECTS) $(MAIN_OBJECT) -o $@ $(LDFLAGS)
 	@echo "=== collector 编译完成 ==="
+collector_asan: $(CORE_OBJECTS) $(MAIN_OBJECT)
+	$(CC) $(CORE_OBJECTS) $(MAIN_OBJECT) -o $@ $(LDFLAGS) $(ASAN_LDFLAGS)
+	@echo "=== collector_asan (带内存检测) 编译完成 ==="
+
 test_ring_buffer: $(CORE_OBJECTS) $(TEST_OBJECT)
 	$(CC) $(CORE_OBJECTS) $(TEST_OBJECT) -o $@ $(LDFLAGS)
 	@echo "=== test_ring_buffer 编译完成 ==="

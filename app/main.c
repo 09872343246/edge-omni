@@ -104,7 +104,9 @@ void *collector_thread(void *arg){
 	sensor_data_t sht_buf[2];
 
 	int mpu_fail_streak = 0;
+	int mpu_no_data_streak = 0;
 	int sht_fail_streak = 0;
+
 	while (1) {
 		if (mpu_ops) {
 			if (!mpu_handle) {
@@ -133,6 +135,7 @@ void *collector_thread(void *arg){
 			ssize_t n = mpu_ops->read(mpu_handle, mpu_buf, sizeof(mpu_buf));
 			if (n < 0) {
 				mpu_fail_streak++;
+				mpu_no_data_streak = 0;
 				atomic_fetch_add(&g_fsm.mpu_fail_count, 1);
 				printf("[collector] MPU6050 读失败 #%d (ret=%zd)\n", mpu_fail_streak, n);
 
@@ -167,6 +170,7 @@ void *collector_thread(void *arg){
 
 				}
 				mpu_fail_streak = 0;
+				mpu_no_data_streak = 0;
 				printf("[collector] MPU6050 数据: ");
 				const char *name[] = {"AX","AY","AZ","GX","GY","GZ"};
 				for (int i = 0; i < count; i++) {
@@ -180,7 +184,36 @@ void *collector_thread(void *arg){
 					db_insert_sensor(ts, "mpu6050", name[mpu_buf[i].channel], mpu_buf[i].value);
 				}
 
+			} else {
+				mpu_no_data_streak++;
+				if (mpu_no_data_streak >= 10) {
+					mpu_fail_streak++;
+					mpu_no_data_streak = 0;
+					atomic_fetch_add(&g_fsm.mpu_fail_count, 1);
+					printf("[collector] MPU6050 连续无数据，视为失败 #%d\n", mpu_fail_streak);
+					if (mpu_handle) {
+						printf("[collector] 关闭旧 handle，尝试重新探测...\n");
+						mpu_ops->close(&mpu_handle);
+						mpu_handle = NULL;
+					}
+					for (int i = 0; i <= 3 && mpu_handle == NULL; i++) {
+						char path[32];
+						snprintf(path, sizeof(path), "/dev/input/event%d", i);
+						if (access(path, F_OK) == 0) {
+							if (mpu_ops->open(path, &mpu_handle) == 0) {
+								printf("[collector] MPU6050 重新打开 %s\n", path);
+								break;
+							}
+						}
+					}
+					if (mpu_fail_streak >= 3) {
+						printf("[collector] >>> 连续失败3次，触发 DEGRADED!\n");
+						fsm_transition(&g_fsm, EVENT_MPU_FAIL);
+					}
+				}
 			}
+
+
 
 		}
 mpu_done:
