@@ -585,7 +585,7 @@ int main(int argc, char *argv[]){
 
 	fsm_transition(&g_fsm, EVENT_INIT_OK);
 	printf("[main] 当前系统状态: %s\n", fsm_get_state_name(&g_fsm));
-	db_insert_alarm((int)time(NULL), "test_alarm", 1, "系统启动测试报警");
+	//db_insert_alarm((int)time(NULL), "test_alarm", 1, "系统启动测试报警");
 
 
 	pthread_t collector_tid;
