@@ -7,8 +7,9 @@
 #include <errno.h>
 #include <time.h>
 #include <sys/stat.h>
+#include <stdatomic.h>
 #include "sensor_hal.h"
-
+#include "metrics.h"
 
 
 
@@ -23,15 +24,25 @@ typedef struct {
 static int read_sysfs_int(int fd, int32_t *out_val){
 	char buf[32];
 	ssize_t n;
-	lseek(fd, 0, SEEK_SET);
-	n = read(fd, buf, sizeof(buf) - 1);
-	if (n <= 0) {
-		return -EIO;
+	int retries = 0;
+
+	while (retries < 3) {
+		lseek(fd, 0, SEEK_SET);
+		n = read(fd, buf, sizeof(buf) - 1);
+		if (n > 0) {
+			buf[n] = '\0';
+			*out_val = (int32_t)atoi(buf);
+			return 0;
+		}
+		atomic_fetch_add(&g_i2c_retry_total, 1);
+		retries++;
+		struct timespec retry_ts = {.tv_sec = 0, .tv_nsec = 1000000};
+		nanosleep(&retry_ts, NULL);
 	}
-	buf[n] = '\0';
-	*out_val = (int32_t)atoi(buf);
-	return 0;
+	return -EIO;
+
 }
+
 
 
 static int sht30_hal_open(const char *dev_path, void **handle){
@@ -74,6 +85,10 @@ static ssize_t sht30_hal_read(void *handle, void *buf, size_t len){
 	if (ret < 0) {
 		return ret;
 	}
+
+	atomic_store(&g_temperature_milli, temp_raw);
+	atomic_store(&g_humidity_milli,    hum_raw);
+
 	out[0].timestamp_ns = (uint64_t)ts.tv_sec * 1000000000ULL+ (uint64_t)ts.tv_nsec;
 	out[0].sensor_type  = SENSOR_SHT30;
 	out[0].channel      = 0;

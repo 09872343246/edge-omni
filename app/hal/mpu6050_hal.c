@@ -6,8 +6,9 @@
 #include <errno.h>
 #include <time.h>
 #include <libevdev-1.0/libevdev/libevdev.h>
+#include <stdatomic.h>
 #include "sensor_hal.h"
-
+#include "metrics.h"
 
 typedef struct {
 	int			fd;
@@ -73,6 +74,7 @@ static ssize_t mpu6050_hal_read(void *handle, void *buf, size_t len){
 			if (rc == -EAGAIN) {
 				break;
 			}
+			atomic_fetch_add(&g_i2c_retry_total, 1);
 			return rc;
 		}
 		if (ev.type != EV_ABS) {

@@ -20,7 +20,7 @@
 #include "include/fsm.h"
 #include "sensor_hal.h"
 #include "db_manager.h"
-
+#include "include/metrics.h"
 
 fsm_context_t g_fsm;
 
@@ -61,6 +61,10 @@ void *collector_thread(void *arg){
 	const sensor_hal_ops_t *sht_ops = hal_get_ops("sht30");
 	void *mpu_handle = NULL;
 	void *sht_handle = NULL;
+
+        sensor_data_t mpu_buf[6];
+        sensor_data_t sht_buf[2];
+
 	if (mpu_ops) {
 		for (int i = 0; i <= 3 && mpu_handle == NULL; i++) {
 			char path[32];
@@ -71,7 +75,16 @@ void *collector_thread(void *arg){
 					sensor_data_t warmup[6];
 					int warmup_ok = 0;
 					for (int w = 0; w < 50; w++) {
-						ssize_t n = mpu_ops->read(mpu_handle, warmup, sizeof(warmup));
+						//ssize_t n = mpu_ops->read(mpu_handle, warmup, sizeof(warmup));
+						struct timespec ts_mpu_start, ts_mpu_end;
+						clock_gettime(CLOCK_MONOTONIC, &ts_mpu_start);
+						ssize_t n = mpu_ops->read(mpu_handle, mpu_buf, sizeof(mpu_buf));
+						clock_gettime(CLOCK_MONOTONIC, &ts_mpu_end);
+						int latency_mpu = (ts_mpu_end.tv_sec - ts_mpu_start.tv_sec) * 1000000+ (ts_mpu_end.tv_nsec - ts_mpu_start.tv_nsec) / 1000;
+						record_latency(latency_mpu);
+
+
+
 						if (n > 0) {
 							printf("[collector] MPU6050 热身成功\n");
 							warmup_ok = 1;
@@ -100,9 +113,6 @@ void *collector_thread(void *arg){
 			sht_handle = NULL;
 		}
 	}
-	sensor_data_t mpu_buf[6];
-	sensor_data_t sht_buf[2];
-
 	int mpu_fail_streak = 0;
 	int mpu_no_data_streak = 0;
 	int sht_fail_streak = 0;
@@ -220,8 +230,13 @@ mpu_done:
 		;
 
 		if (sht_ops && sht_handle) {
+//			ssize_t n = sht_ops->read(sht_handle, sht_buf, sizeof(sht_buf));
+			struct timespec ts_sht_start, ts_sht_end;
+			clock_gettime(CLOCK_MONOTONIC, &ts_sht_start);
 			ssize_t n = sht_ops->read(sht_handle, sht_buf, sizeof(sht_buf));
-
+			clock_gettime(CLOCK_MONOTONIC, &ts_sht_end);
+			int latency_sht = (ts_sht_end.tv_sec - ts_sht_start.tv_sec) * 1000000 + (ts_sht_end.tv_nsec - ts_sht_start.tv_nsec) / 1000;
+			record_latency(latency_sht);
 			if (n < 0) {
 				sht_fail_streak++;
 				atomic_fetch_add(&g_fsm.i2c_retry_count, 1);
@@ -252,7 +267,7 @@ mpu_done:
 				}
 			}
 		}
-
+		atomic_store(&g_system_state, (int)fsm_get_state(&g_fsm));
 		struct timespec ts = {.tv_sec = 0, .tv_nsec = 100000000};
 		nanosleep(&ts, NULL);
 	}
@@ -426,6 +441,9 @@ void *web_thread(void *arg){
 			int mpu_fails = atomic_fetch_add(&g_fsm.mpu_fail_count,0);
 			int i2c_retries = atomic_fetch_add(&g_fsm.i2c_retry_count,0);
 
+			int p50, p99;
+			calc_latency_percentile(&p50, &p99);
+
 			int temp_raw = atomic_fetch_add(&g_fsm.temp_raw, 0);
 			int hum_raw  = atomic_fetch_add(&g_fsm.hum_raw, 0);
 
@@ -455,13 +473,19 @@ void *web_thread(void *arg){
 				"\n"
 				"# HELP sensor_humidity_percent Relative humidity in percent\n"
 				"# TYPE sensor_humidity_percent gauge\n"
-				"sensor_humidity_percent{id=\"sht30\"} %.1f\n",
-
+				"sensor_humidity_percent{id=\"sht30\"} %.1f\n"
+				"\n"
+				"# HELP task_latency_us Task latency in microseconds\n"
+				"# TYPE task_latency_us summary\n"
+				"task_latency_us{quantile=\"0.50\"} %d\n"
+				"task_latency_us{quantile=\"0.99\"} %d\n",
 				state,
 				state_str,
 				mpu_fails,
 				i2c_retries,
-				temp_raw / 1000.0, hum_raw / 1000.0
+				temp_raw / 1000.0, hum_raw / 1000.0,
+				p50,
+				p99
 			);
 			if (body_len < 0 || body_len >= (int)sizeof(body)) {
 				 body_len = sizeof(body) - 1;

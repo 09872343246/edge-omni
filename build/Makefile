@@ -11,6 +11,7 @@ SRC_DIR = ../app
 CORE_SOURCES =	$(SRC_DIR)/core/ring_buffer.c \
 		$(SRC_DIR)/core/fsm.c \
 		$(SRC_DIR)/core/db_manager.c \
+		$(SRC_DIR)/core/metrics.c \
 		$(SRC_DIR)/hal/mpu6050_hal.c \
 		$(SRC_DIR)/hal/sht30_hal.c \
 		$(SRC_DIR)/hal/hal_register.c
