@@ -705,6 +705,16 @@ int main(int argc, char *argv[]){
 	}
 	printf("[main] Modbus TCP 服务器已启动,监听端口502\n");
 
+	sleep(3);
+
+	FILE *fp = fopen("/tmp/ota_success_flag", "w");
+	if (fp) {
+		fprintf(fp, "OTA_OK");
+		fclose(fp);
+		printf("[main] OTA 启动成功标志已写入 /tmp/ota_success_flag\n");
+	} else {
+		printf("[main] ⚠️ 无法写入 OTA 成功标志: %s\n", strerror(errno));
+	}
 
 	pthread_join(collector_tid, NULL);
 	pthread_join(web_tid, NULL);

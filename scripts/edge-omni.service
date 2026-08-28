@@ -1,0 +1,13 @@
+[Unit]
+Description=Edge-Omni Sensor Collector
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/app/current/collector
+WorkingDirectory=/app/current/
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
