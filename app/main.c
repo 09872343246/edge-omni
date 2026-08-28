@@ -21,6 +21,8 @@
 #include "sensor_hal.h"
 #include "db_manager.h"
 #include "include/metrics.h"
+#include "modbus_server.h"
+
 
 fsm_context_t g_fsm;
 
@@ -116,6 +118,9 @@ void *collector_thread(void *arg){
 	int mpu_fail_streak = 0;
 	int mpu_no_data_streak = 0;
 	int sht_fail_streak = 0;
+	int32_t latest_ax = 0;
+	int32_t latest_ay = 0;
+
 
 	while (1) {
 		if (mpu_ops) {
@@ -192,6 +197,10 @@ void *collector_thread(void *arg){
 				int ts = (int)time(NULL);
 				for (int i = 0; i < count; i++) {
 					db_insert_sensor(ts, "mpu6050", name[mpu_buf[i].channel], mpu_buf[i].value);
+				if (mpu_buf[i].channel == 0) latest_ax = mpu_buf[i].value;
+
+				if (mpu_buf[i].channel == 1) latest_ay = mpu_buf[i].value;
+
 				}
 
 			} else {
@@ -265,6 +274,15 @@ mpu_done:
 					const char *ch_name = (sht_buf[i].channel == 0) ? "temperature" : "humidity";
 					db_insert_sensor(ts, "sht30", ch_name, sht_buf[i].value);
 				}
+
+
+
+				modbus_reg_data_t mb_data;
+				mb_data.temperature = (uint16_t)(sht_buf[0].value / 10);
+				mb_data.humidity    = (uint16_t)(sht_buf[1].value / 10);
+				mb_data.accel_x     = (uint16_t)latest_ax;
+				mb_data.accel_y     = (uint16_t)latest_ay;
+				modbus_server_update_data(&mb_data);
 			}
 		}
 		atomic_store(&g_system_state, (int)fsm_get_state(&g_fsm));
@@ -680,9 +698,18 @@ int main(int argc, char *argv[]){
 	}
 	printf("Web 线程已创建,TID=%lu\n", (unsigned long)web_tid);
 
+	printf("[main] 启动 Modbus TCP 服务器...\n");
+	if (modbus_server_start() != 0) {
+		fprintf(stderr, "[main] Modbus 服务器启动失败!\n");
+		exit(EXIT_FAILURE);
+	}
+	printf("[main] Modbus TCP 服务器已启动,监听端口502\n");
+
 
 	pthread_join(collector_tid, NULL);
 	pthread_join(web_tid, NULL);
+	modbus_server_stop();
+
 
 	db_close();
 

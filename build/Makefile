@@ -2,10 +2,13 @@ CC      = gcc
 CFLAGS  = -Wall -Wextra -O2 -std=c11
 CFLAGS += -I../app/include
 CFLAGS += -I/usr/include/libevdev-1.0
+CFLAGS += -I/usr/local/include/modbus
 CFLAGS += -D_POSIX_C_SOURCE=200809L
 
 
 LDFLAGS = -levdev -lpthread -latomic -lsqlite3
+LDFLAGS += -L/usr/local/lib -lmodbus
+
 
 SRC_DIR = ../app
 CORE_SOURCES =	$(SRC_DIR)/core/ring_buffer.c \
@@ -14,7 +17,8 @@ CORE_SOURCES =	$(SRC_DIR)/core/ring_buffer.c \
 		$(SRC_DIR)/core/metrics.c \
 		$(SRC_DIR)/hal/mpu6050_hal.c \
 		$(SRC_DIR)/hal/sht30_hal.c \
-		$(SRC_DIR)/hal/hal_register.c
+		$(SRC_DIR)/hal/hal_register.c \
+		$(SRC_DIR)/modbus/modbus_server.c
 
 MAIN_SOURCE = $(SRC_DIR)/main.c
 TEST_SRC = $(SRC_DIR)/core/ring_buffer_test.c
