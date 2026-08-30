@@ -1,0 +1,12 @@
+#ifndef WATCHDOG_H
+#define WATCHDOG_H
+
+#include <stdatomic.h>
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+
+

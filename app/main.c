@@ -9,7 +9,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <stdatomic.h>
-
+#include <fcntl.h>
 
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -22,9 +22,15 @@
 #include "db_manager.h"
 #include "include/metrics.h"
 #include "modbus_server.h"
+#include "watchdog.h"
 
+
+int g_watchdog_test_mode = 0;
 
 fsm_context_t g_fsm;
+
+_Atomic uint64_t g_sensor_heartbeat = 0;
+_Atomic uint64_t g_http_heartbeat   = 0;
 
 
 void *collector_thread(void *arg){
@@ -122,7 +128,12 @@ void *collector_thread(void *arg){
 	int32_t latest_ay = 0;
 
 
-	while (1) {
+	while (1){
+
+		printf("[collector] >>> 循环开始，喂心跳\n");
+		atomic_fetch_add_explicit(&g_sensor_heartbeat, 1, memory_order_relaxed);
+
+
 		if (mpu_ops) {
 			if (!mpu_handle) {
 				for (int i = 0; i <= 3 && mpu_handle == NULL; i++) {
@@ -238,8 +249,7 @@ void *collector_thread(void *arg){
 mpu_done:
 		;
 
-		if (sht_ops && sht_handle) {
-//			ssize_t n = sht_ops->read(sht_handle, sht_buf, sizeof(sht_buf));
+		if (sht_ops && sht_handle){
 			struct timespec ts_sht_start, ts_sht_end;
 			clock_gettime(CLOCK_MONOTONIC, &ts_sht_start);
 			ssize_t n = sht_ops->read(sht_handle, sht_buf, sizeof(sht_buf));
@@ -285,7 +295,13 @@ mpu_done:
 				modbus_server_update_data(&mb_data);
 			}
 		}
+
 		atomic_store(&g_system_state, (int)fsm_get_state(&g_fsm));
+
+		printf("[collector] 本轮结束，喂心跳，准备sleep\n");
+		atomic_fetch_add_explicit(&g_sensor_heartbeat, 1, memory_order_relaxed);
+
+
 		struct timespec ts = {.tv_sec = 0, .tv_nsec = 100000000};
 		nanosleep(&ts, NULL);
 	}
@@ -378,6 +394,19 @@ void *web_thread(void *arg){
 		close(server_fd);
 		return NULL;
 	}
+	int flags = fcntl(server_fd, F_GETFL, 0);
+	if (flags < 0) {
+		perror("[web] fcntl F_GETFL failed");
+		close(server_fd);
+		return NULL;
+	}
+	if (fcntl(server_fd, F_SETFL, flags | O_NONBLOCK) < 0) {
+		perror("[web] fcntl F_SETFL failed");
+		close(server_fd);
+		return NULL;
+	}
+
+
 	if (listen(server_fd, 5) < 0) {
 		perror("[web] listen失败");
 		close(server_fd);
@@ -423,11 +452,18 @@ void *web_thread(void *arg){
 	return NULL;
 
 */
+		WATCHDOG_FEED_HTTP();
+
 		struct sockaddr_in client_addr;
 		socklen_t addr_len = sizeof(client_addr);
 		int client_fd = accept(server_fd, (struct sockaddr *)&client_addr, &addr_len);
 		if (client_fd < 0) {
-			continue;
+			if (errno == EAGAIN || errno == EWOULDBLOCK) {
+				struct timespec ts = {.tv_sec = 0, .tv_nsec = 1000};
+				nanosleep(&ts, NULL);
+				continue;
+			}
+		continue;
 		}
 
 		struct timeval tv;
@@ -465,7 +501,8 @@ void *web_thread(void *arg){
 			int temp_raw = atomic_fetch_add(&g_fsm.temp_raw, 0);
 			int hum_raw  = atomic_fetch_add(&g_fsm.hum_raw, 0);
 
-
+			int dead_thread = atomic_fetch_add(&g_watchdog_dead_thread, 0);
+			int monitor_alive = atomic_fetch_add(&g_watchdog_monitor_alive, 0);
 
 			char body[8192];
 			int body_len = snprintf(body, sizeof(body),
@@ -496,14 +533,24 @@ void *web_thread(void *arg){
 				"# HELP task_latency_us Task latency in microseconds\n"
 				"# TYPE task_latency_us summary\n"
 				"task_latency_us{quantile=\"0.50\"} %d\n"
-				"task_latency_us{quantile=\"0.99\"} %d\n",
+				"task_latency_us{quantile=\"0.99\"} %d\n"
+				"\n"
+				"# HELP watchdog_dead_thread_id Which thread is dead (0=none,1=collect,2=http)\n"
+				"# TYPE watchdog_dead_thread_id gauge\n"
+				"watchdog_dead_thread_id %d\n"
+				"\n"
+				"# HELP watchdog_monitor_alive Is watchdog monitor thread running (1=yes,0=no)\n"
+				"# TYPE watchdog_monitor_alive gauge\n"
+				"watchdog_monitor_alive %d\n",
 				state,
 				state_str,
 				mpu_fails,
 				i2c_retries,
 				temp_raw / 1000.0, hum_raw / 1000.0,
 				p50,
-				p99
+				p99,
+				dead_thread,
+				monitor_alive
 			);
 			if (body_len < 0 || body_len >= (int)sizeof(body)) {
 				 body_len = sizeof(body) - 1;
@@ -626,7 +673,7 @@ void *web_thread(void *arg){
 			const char *body = "404 Not Found\n";
 			send_http_response(client_fd, 404, "text/plain", body, strlen(body));
 		}
-
+		atomic_fetch_add_explicit(&g_http_heartbeat, 1, memory_order_relaxed);
 		shutdown(client_fd, SHUT_WR);
 		close(client_fd);
 	}
@@ -638,7 +685,10 @@ void *web_thread(void *arg){
 }
 int main(int argc, char *argv[]){
 	signal(SIGPIPE, SIG_IGN);
-
+	if (argc > 1 && strcmp(argv[1], "--test-watchdog") == 0) {
+		g_watchdog_test_mode = 1;
+		printf("[main] 看门狗测试模式已开启：检测到假死时只报警，不触发系统复位\n");
+	}
 	printf("=== Edge-Omni 启动 ===\n");
 	printf("[main] 初始化状态机...\n");
 	if (fsm_init(&g_fsm) != 0) {
@@ -697,6 +747,29 @@ int main(int argc, char *argv[]){
 		exit(EXIT_FAILURE);
 	}
 	printf("Web 线程已创建,TID=%lu\n", (unsigned long)web_tid);
+
+
+
+	pthread_t watchdog_tid;
+	printf("创建看门狗监控线程...\n");
+	ret = pthread_create(
+		&watchdog_tid,
+		NULL,
+		watchdog_monitor_thread,
+		NULL
+	);
+	if (ret != 0) {
+		perror("pthread_create watchdog failed");
+		exit(EXIT_FAILURE);
+	}
+	printf("看门狗监控线程已创建,TID=%lu\n", (unsigned long)watchdog_tid);
+
+
+
+
+
+
+
 
 	printf("[main] 启动 Modbus TCP 服务器...\n");
 	if (modbus_server_start() != 0) {
